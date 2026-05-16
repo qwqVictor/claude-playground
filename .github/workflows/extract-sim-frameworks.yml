@@ -16,78 +16,93 @@ jobs:
 
       - name: Probe all possible framework locations
         run: |
-          echo "=== Searching Xcode.app ==="
-          find /Applications/Xcode.app -name "MTLSimDriver.framework" 2>/dev/null || true
-          find /Applications/Xcode.app -name "MTLSimImplementation.framework" 2>/dev/null || true
-          find /Applications/Xcode.app -name "MetalSerializer.framework" 2>/dev/null || true
-          echo "=== Searching CoreSimulator ==="
-          find /Library/Developer/CoreSimulator -name "MTLSimDriver.framework" 2>/dev/null | head -5 || true
-          echo "=== Pre-installed runtimes ==="
-          xcrun simctl runtime list 2>/dev/null || true
-          ls /Library/Developer/CoreSimulator/Profiles/Runtimes/ 2>/dev/null || echo "(empty)"
-          ls /Library/Developer/CoreSimulator/Images/ 2>/dev/null || echo "(no Images dir)"
+          set +e
+          echo "=== macOS system PrivateFrameworks ==="
+          ls /System/Library/PrivateFrameworks/ | grep -iE "^MTL|^Metal"
 
-      - name: Find or download iOS Simulator Runtime
-        id: find_runtime
+          echo ""
+          echo "=== Xcode.app: MTLSimDriver ==="
+          find /Applications/Xcode.app -name "MTLSimDriver.framework" 2>/dev/null
+
+          echo ""
+          echo "=== Xcode.app: MTLSimImplementation ==="
+          find /Applications/Xcode.app -name "MTLSimImplementation.framework" 2>/dev/null
+
+          echo ""
+          echo "=== Xcode.app: MetalSerializer ==="
+          find /Applications/Xcode.app -name "MetalSerializer.framework" 2>/dev/null
+
+          echo ""
+          echo "=== iPhoneSimulator.platform PrivateFrameworks ==="
+          PLAT="/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform"
+          find "$PLAT" -name "MTLSim*.framework" -o -name "MetalSerializer.framework" 2>/dev/null
+
+          echo ""
+          echo "=== CoreSimulator pre-installed runtimes ==="
+          ls /Library/Developer/CoreSimulator/Profiles/Runtimes/ 2>/dev/null || echo "(none)"
+          ls /Library/Developer/CoreSimulator/Images/ 2>/dev/null || echo "(no Images dir)"
+          ls /Library/Developer/CoreSimulator/Volumes/ 2>/dev/null || echo "(no Volumes dir)"
+          xcrun simctl runtime list 2>/dev/null || true
+
+      - name: Collect frameworks
         run: |
-          find_runtime_root() {
-            for p in \
-              "/Library/Developer/CoreSimulator/Volumes/iOS_*/Contents/Resources/RuntimeRoot" \
-              "/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS*.simruntime/Contents/Resources/RuntimeRoot" \
-              "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS*.simruntime/Contents/Resources/RuntimeRoot"
-            do
-              FOUND=$(ls -d $p 2>/dev/null | head -1)
-              [ -n "$FOUND" ] && echo "$FOUND" && return 0
-            done
+          set +e
+          OUT="sim-frameworks"
+          mkdir -p "$OUT"
+          MISSING=""
+
+          copy_fw() {
+            local FW="$1"
+            local SRC="$2"
+            if [ -d "$SRC" ]; then
+              echo "  [OK] copying from $SRC"
+              cp -R "$SRC" "$OUT/"
+              BIN=$(find "$OUT/${FW}.framework" -name "$FW" -not -name "*.h" -type f | head -1)
+              [ -n "$BIN" ] && lipo -info "$BIN" 2>/dev/null || echo "  (no binary)"
+              return 0
+            fi
             return 1
           }
 
-          # Check if already present
-          RUNTIME_ROOT=$(find_runtime_root)
-          if [ -n "$RUNTIME_ROOT" ]; then
-            echo "Pre-installed runtime found: $RUNTIME_ROOT"
-            echo "runtime_root=$RUNTIME_ROOT" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+          find_fw() {
+            local FW="$1"
+            echo "--- $FW ---"
 
-          # Download — no -buildVersion, just let Xcode pick the recommended iOS runtime
-          echo "No runtime found, downloading..."
-          xcodebuild -downloadPlatform iOS
-          echo "Download complete."
+            # 1. macOS system PrivateFrameworks (MTLSimImplementation, MetalSerializer live here)
+            copy_fw "$FW" "/System/Library/PrivateFrameworks/${FW}.framework" && return
 
-          RUNTIME_ROOT=$(find_runtime_root)
-          if [ -z "$RUNTIME_ROOT" ]; then
-            echo "ERROR: RuntimeRoot still not found after download. Current state:"
-            find /Library/Developer/CoreSimulator -maxdepth 5 -type d 2>/dev/null | head -40
-            xcrun simctl runtime list 2>/dev/null || true
-            exit 1
-          fi
+            # 2. Inside Xcode iPhoneSimulator.platform
+            PLAT="/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform"
+            SRC=$(find "$PLAT" -name "${FW}.framework" -type d 2>/dev/null | head -1)
+            [ -n "$SRC" ] && copy_fw "$FW" "$SRC" && return
 
-          echo "runtime_root=$RUNTIME_ROOT" >> $GITHUB_OUTPUT
-        timeout-minutes: 45
+            # 3. Anywhere in Xcode.app
+            SRC=$(find /Applications/Xcode.app -name "${FW}.framework" -type d 2>/dev/null | head -1)
+            [ -n "$SRC" ] && copy_fw "$FW" "$SRC" && return
 
-      - name: Extract Metal Simulator Frameworks
-        run: |
-          RUNTIME_ROOT="${{ steps.find_runtime.outputs.runtime_root }}"
-          OUT="sim-frameworks"
-          mkdir -p "$OUT"
+            # 4. CoreSimulator installed runtimes
+            SRC=$(find /Library/Developer/CoreSimulator -name "${FW}.framework" -type d 2>/dev/null | head -1)
+            [ -n "$SRC" ] && copy_fw "$FW" "$SRC" && return
 
-          for FW in MTLSimDriver MTLSimImplementation MetalSerializer; do
-            SRC="$RUNTIME_ROOT/System/Library/PrivateFrameworks/${FW}.framework"
-            if [ -d "$SRC" ]; then
-              echo "Copying $FW.framework ..."
-              cp -R "$SRC" "$OUT/"
-              BIN=$(find "$OUT/${FW}.framework" -name "$FW" -type f | head -1)
-              [ -n "$BIN" ] && lipo -info "$BIN" || echo "  (no binary found)"
-            else
-              echo "ERROR: $SRC not found"
-              ls "$RUNTIME_ROOT/System/Library/PrivateFrameworks/" | grep -iE "mtl|metal" || true
-            fi
-          done
+            echo "  [MISSING] $FW.framework not found on this runner"
+            MISSING="$MISSING $FW"
+          }
 
+          find_fw MTLSimDriver
+          find_fw MTLSimImplementation
+          find_fw MetalSerializer
+
+          echo ""
           echo "=== Result ==="
           find "$OUT" -type f | sort
-          du -sh "$OUT"
+          du -sh "$OUT" 2>/dev/null || true
+
+          if [ -n "$MISSING" ]; then
+            echo ""
+            echo "MISSING frameworks:$MISSING"
+            echo "These require an iOS Simulator runtime to be installed."
+            exit 1
+          fi
 
       - name: Upload as artifact
         uses: actions/upload-artifact@v4
