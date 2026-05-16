@@ -5,23 +5,40 @@ on:
 
 jobs:
   extract:
-    runs-on: macos-13  # Xcode 14.x, includes iOS 16.x simulator runtimes
+    runs-on: macos-14  # Apple Silicon (arm64), Xcode 15.4 default
 
     steps:
-      - name: Install iOS 16.4 Simulator Runtime
+      - name: Environment info
         run: |
-          # Download and install iOS 16.4 simulator runtime
-          xcodebuild -downloadPlatform iOS -buildVersion 20E247
-        timeout-minutes: 30
-        continue-on-error: true
+          xcodebuild -version
+          sw_vers
+          uname -m
 
-      - name: Find runtime root
+      - name: Probe all possible framework locations
+        run: |
+          echo "=== Searching Xcode.app ==="
+          find /Applications/Xcode.app -name "MTLSimDriver.framework" 2>/dev/null || true
+          find /Applications/Xcode.app -name "MTLSimImplementation.framework" 2>/dev/null || true
+          find /Applications/Xcode.app -name "MetalSerializer.framework" 2>/dev/null || true
+          echo "=== Searching CoreSimulator ==="
+          find /Library/Developer/CoreSimulator -name "MTLSimDriver.framework" 2>/dev/null | head -5 || true
+          echo "=== Pre-installed runtimes ==="
+          xcrun simctl runtime list 2>/dev/null || true
+          ls /Library/Developer/CoreSimulator/Profiles/Runtimes/ 2>/dev/null || echo "(empty)"
+          ls /Library/Developer/CoreSimulator/Images/ 2>/dev/null || echo "(no Images dir)"
+
+      - name: Download iOS 16.4 Simulator Runtime
+        run: |
+          # iOS 16.4 build 20E247 — smallest available iOS 16 runtime
+          xcodebuild -downloadPlatform iOS -buildVersion 20E247
+        timeout-minutes: 45
+
+      - name: Find RuntimeRoot after download
         id: find_runtime
         run: |
-          # Look for the runtime in all known locations
+          # Xcode 15+ stores runtimes as mounted DMGs under CoreSimulator/Volumes
+          # or as .simruntime bundles under CoreSimulator/Profiles/Runtimes
           RUNTIME_ROOT=""
-
-          # Xcode 14+ DMG-based runtimes
           for p in \
             "/Library/Developer/CoreSimulator/Volumes/iOS_*/Contents/Resources/RuntimeRoot" \
             "/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS*.simruntime/Contents/Resources/RuntimeRoot" \
@@ -30,15 +47,15 @@ jobs:
             FOUND=$(ls -d $p 2>/dev/null | head -1)
             if [ -n "$FOUND" ]; then
               RUNTIME_ROOT="$FOUND"
-              echo "Found runtime at: $RUNTIME_ROOT"
+              echo "Found: $RUNTIME_ROOT"
               break
             fi
           done
 
           if [ -z "$RUNTIME_ROOT" ]; then
-            echo "No runtime found, listing available runtimes:"
+            echo "RuntimeRoot not found after download, dumping state:"
+            find /Library/Developer/CoreSimulator -maxdepth 4 -type d 2>/dev/null | head -30
             xcrun simctl runtime list 2>/dev/null || true
-            find /Library/Developer/CoreSimulator -name "RuntimeRoot" 2>/dev/null | head -10 || true
             exit 1
           fi
 
@@ -55,19 +72,17 @@ jobs:
             if [ -d "$SRC" ]; then
               echo "Copying $FW.framework ..."
               cp -R "$SRC" "$OUT/"
-              # Remove simulator-only slice cruft, keep arm64
-              find "$OUT/${FW}.framework" -name "${FW}" -type f | while read bin; do
-                lipo "$bin" -verify_arch arm64 2>/dev/null && echo "  arm64 OK: $bin" || echo "  WARNING: no arm64 slice in $bin"
-              done
+              BIN=$(find "$OUT/${FW}.framework" -name "$FW" -type f | head -1)
+              [ -n "$BIN" ] && lipo -info "$BIN" || echo "  (no binary found)"
             else
               echo "ERROR: $SRC not found"
-              ls "$RUNTIME_ROOT/System/Library/PrivateFrameworks/" | grep -i mtl || true
+              ls "$RUNTIME_ROOT/System/Library/PrivateFrameworks/" | grep -iE "mtl|metal" || true
             fi
           done
 
-          echo "=== Extracted ==="
-          ls -la "$OUT/"
+          echo "=== Result ==="
           find "$OUT" -type f | sort
+          du -sh "$OUT"
 
       - name: Upload as artifact
         uses: actions/upload-artifact@v4
