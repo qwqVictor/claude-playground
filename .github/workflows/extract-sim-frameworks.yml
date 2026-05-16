@@ -1,0 +1,77 @@
+name: Extract Simulator Metal Frameworks
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: macos-13  # Xcode 14.x, includes iOS 16.x simulator runtimes
+
+    steps:
+      - name: Install iOS 16.4 Simulator Runtime
+        run: |
+          # Download and install iOS 16.4 simulator runtime
+          xcodebuild -downloadPlatform iOS -buildVersion 20E247
+        timeout-minutes: 30
+        continue-on-error: true
+
+      - name: Find runtime root
+        id: find_runtime
+        run: |
+          # Look for the runtime in all known locations
+          RUNTIME_ROOT=""
+
+          # Xcode 14+ DMG-based runtimes
+          for p in \
+            "/Library/Developer/CoreSimulator/Volumes/iOS_*/Contents/Resources/RuntimeRoot" \
+            "/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS*.simruntime/Contents/Resources/RuntimeRoot" \
+            "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS*.simruntime/Contents/Resources/RuntimeRoot"
+          do
+            FOUND=$(ls -d $p 2>/dev/null | head -1)
+            if [ -n "$FOUND" ]; then
+              RUNTIME_ROOT="$FOUND"
+              echo "Found runtime at: $RUNTIME_ROOT"
+              break
+            fi
+          done
+
+          if [ -z "$RUNTIME_ROOT" ]; then
+            echo "No runtime found, listing available runtimes:"
+            xcrun simctl runtime list 2>/dev/null || true
+            find /Library/Developer/CoreSimulator -name "RuntimeRoot" 2>/dev/null | head -10 || true
+            exit 1
+          fi
+
+          echo "runtime_root=$RUNTIME_ROOT" >> $GITHUB_OUTPUT
+
+      - name: Extract Metal Simulator Frameworks
+        run: |
+          RUNTIME_ROOT="${{ steps.find_runtime.outputs.runtime_root }}"
+          OUT="sim-frameworks"
+          mkdir -p "$OUT"
+
+          for FW in MTLSimDriver MTLSimImplementation MetalSerializer; do
+            SRC="$RUNTIME_ROOT/System/Library/PrivateFrameworks/${FW}.framework"
+            if [ -d "$SRC" ]; then
+              echo "Copying $FW.framework ..."
+              cp -R "$SRC" "$OUT/"
+              # Remove simulator-only slice cruft, keep arm64
+              find "$OUT/${FW}.framework" -name "${FW}" -type f | while read bin; do
+                lipo "$bin" -verify_arch arm64 2>/dev/null && echo "  arm64 OK: $bin" || echo "  WARNING: no arm64 slice in $bin"
+              done
+            else
+              echo "ERROR: $SRC not found"
+              ls "$RUNTIME_ROOT/System/Library/PrivateFrameworks/" | grep -i mtl || true
+            fi
+          done
+
+          echo "=== Extracted ==="
+          ls -la "$OUT/"
+          find "$OUT" -type f | sort
+
+      - name: Upload as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-metal-frameworks
+          path: sim-frameworks/
+          retention-days: 7
