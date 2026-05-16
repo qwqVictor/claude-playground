@@ -175,30 +175,16 @@ jobs:
           sudo hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -readonly
           df -h /
 
-          echo "压缩打包 (排除非必要文件)..."
-          sudo tar -C "$MOUNT" \
-            --exclude='./System/Library/Fonts' \
-            --exclude='./System/Library/Sounds' \
-            --exclude='./System/Library/Perl' \
-            --exclude='./System/Library/Python' \
-            --exclude='./System/Library/Tcl' \
-            --exclude='./System/Library/Spotlight' \
-            --exclude='./System/Library/CacheDelete' \
-            --exclude='./System/Library/Documentation' \
-            --exclude='./System/iOSSupport' \
-            --exclude='./System/Applications' \
-            --exclude='./Applications' \
-            --exclude='./usr/share/man' \
-            --exclude='./usr/share/locale' \
-            -cJf /tmp/rootfs.tar.xz .
+          echo "压缩打包 (gzip)..."
+          sudo tar -C "$MOUNT" -czf /tmp/rootfs.tar.gz .
 
           sudo hdiutil detach "$MOUNT" || true
-          ls -lh /tmp/rootfs.tar.xz
+          ls -lh /tmp/rootfs.tar.gz
           df -h /
 
       - name: Split archive and upload
         run: |
-          split -b 1900m /tmp/rootfs.tar.xz /tmp/rootfs_part_
+          split -b 1900m /tmp/rootfs.tar.gz /tmp/rootfs_part_
           ls -lh /tmp/rootfs_part_*
 
       - name: Upload rootfs artifact
