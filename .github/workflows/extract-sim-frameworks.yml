@@ -36,7 +36,7 @@ jobs:
           ls -lh "$DMG"
 
           echo "Mounting..."
-          hdiutil attach "$DMG" -mountpoint "$MOUNT_POINT" -nobrowse -readonly -quiet
+          sudo hdiutil attach "$DMG" -mountpoint "$MOUNT_POINT" -nobrowse -readonly
 
           echo "Mounted. Locating RuntimeRoot..."
           RUNTIME_ROOT=$(find "$MOUNT_POINT" -maxdepth 5 -name "RuntimeRoot" -type d | head -1)
@@ -63,7 +63,7 @@ jobs:
           done
 
           echo "Unmounting..."
-          hdiutil detach "$MOUNT_POINT" -quiet || true
+          sudo hdiutil detach "$MOUNT_POINT" || true
 
           echo ""
           echo "=== Result ==="
