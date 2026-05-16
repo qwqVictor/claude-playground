@@ -39,13 +39,14 @@ jobs:
           sudo hdiutil attach "$DMG" -mountpoint "$MOUNT_POINT" -nobrowse -readonly
 
           echo "Mounted. Locating RuntimeRoot..."
-          RUNTIME_ROOT=$(find "$MOUNT_POINT" -maxdepth 5 -name "RuntimeRoot" -type d | head -1)
+          # RuntimeRoot is at depth ~9: mount/Library/Developer/CoreSimulator/Profiles/Runtimes/*.simruntime/Contents/Resources/RuntimeRoot
+          RUNTIME_ROOT=$(find "$MOUNT_POINT" -name "RuntimeRoot" -type d | head -1)
           echo "RuntimeRoot: $RUNTIME_ROOT"
 
           if [ -z "$RUNTIME_ROOT" ]; then
-            echo "Contents of mount:"
-            find "$MOUNT_POINT" -maxdepth 4 -type d
-            hdiutil detach "$MOUNT_POINT" || true
+            echo "Contents of mount (full):"
+            find "$MOUNT_POINT" -type d
+            sudo hdiutil detach "$MOUNT_POINT" || true
             exit 1
           fi
 
