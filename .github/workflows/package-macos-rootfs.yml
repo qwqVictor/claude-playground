@@ -15,7 +15,7 @@ jobs:
           sudo rm -rf /Library/Developer/CoreSimulator/Images 2>/dev/null || true
           df -h /
 
-      - name: Extract rootfs DMG from IPSW via HTTP Range
+      - name: Download rootfs and cryptex DMGs from IPSW via HTTP Range
         run: |
           set -euo pipefail
 
@@ -23,8 +23,6 @@ jobs:
           import struct, urllib.request, sys, os
 
           IPSW_URL = "https://updates.cdn-apple.com/2023SpringFCS/fullrestores/032-84884/F97A22EE-9B5E-4FD5-94C1-B39DCEE8D80F/UniversalMac_13.4_22F66_Restore.ipsw"
-          TARGET = "096-09648-074.dmg"  # arm64 rootfs, 6.9GB
-          OUT_PATH = f"/tmp/{TARGET}"
 
           def http_range(url, start, end=None):
               req = urllib.request.Request(url)
@@ -32,17 +30,34 @@ jobs:
               req.add_header("Range", rng)
               return urllib.request.urlopen(req)
 
-          # 1. 获取文件总大小
+          def parse_zip64_extra(extra, need_uncomp, need_comp, need_offset):
+              i = 0
+              while i + 4 <= len(extra):
+                  tag  = struct.unpack_from('<H', extra, i)[0]
+                  size = struct.unpack_from('<H', extra, i+2)[0]
+                  data = extra[i+4:i+4+size]
+                  if tag == 0x0001:
+                      off = 0
+                      uncomp = comp = lhdr = None
+                      if need_uncomp and off + 8 <= len(data):
+                          uncomp = struct.unpack_from('<Q', data, off)[0]; off += 8
+                      if need_comp and off + 8 <= len(data):
+                          comp  = struct.unpack_from('<Q', data, off)[0]; off += 8
+                      if need_offset and off + 8 <= len(data):
+                          lhdr  = struct.unpack_from('<Q', data, off)[0]
+                      return uncomp, comp, lhdr
+                  i += 4 + size
+              return None, None, None
+
+          # 获取 IPSW 大小并解析 ZIP64 中心目录（只做一次）
           req = urllib.request.Request(IPSW_URL, method='HEAD')
           with urllib.request.urlopen(req) as r:
               total_size = int(r.headers['Content-Length'])
-          print(f"IPSW 总大小: {total_size:,} bytes ({total_size/1e9:.1f} GB)")
+          print(f"IPSW 总大小: {total_size/1e9:.1f} GB")
 
-          # 2. 取末尾 65KB，同时查找 EOCD 和 ZIP64 EOCD Locator
           with http_range(IPSW_URL, total_size - 65536) as r:
               tail = r.read()
 
-          # 找普通 EOCD
           eocd_rel = tail.rfind(b'PK\x05\x06')
           if eocd_rel < 0:
               print("ERROR: EOCD not found"); sys.exit(1)
@@ -50,56 +65,23 @@ jobs:
           cd_size   = struct.unpack_from('<I', eocd, 12)[0]
           cd_offset = struct.unpack_from('<I', eocd, 16)[0]
 
-          # 如果是 ZIP64（offset == 0xFFFFFFFF），找 ZIP64 EOCD Locator (PK\x06\x07)
           if cd_offset == 0xFFFFFFFF:
-              print("检测到 ZIP64 格式，查找 ZIP64 EOCD Locator...")
               loc_rel = tail.rfind(b'PK\x06\x07')
               if loc_rel < 0:
-                  print("ERROR: ZIP64 EOCD Locator not found"); sys.exit(1)
-              # ZIP64 EOCD Locator: sig(4) disk(4) zip64_eocd_offset(8) total_disks(4)
-              zip64_eocd_offset = struct.unpack_from('<Q', tail, loc_rel + 8)[0]
-              print(f"ZIP64 EOCD Record 偏移: {zip64_eocd_offset:,}")
-
-              # 获取 ZIP64 EOCD Record
-              with http_range(IPSW_URL, zip64_eocd_offset, zip64_eocd_offset + 255) as r:
-                  z64eocd = r.read()
-              if z64eocd[:4] != b'PK\x06\x06':
-                  print("ERROR: ZIP64 EOCD signature mismatch"); sys.exit(1)
-              # ZIP64 EOCD: sig(4) size(8) ver_made(2) ver_need(2) disk(4) cd_disk(4)
-              #             entries_disk(8) entries_total(8) cd_size(8) cd_offset(8)
-              cd_size   = struct.unpack_from('<Q', z64eocd, 40)[0]
-              cd_offset = struct.unpack_from('<Q', z64eocd, 48)[0]
+                  print("ERROR: ZIP64 Locator not found"); sys.exit(1)
+              z64off = struct.unpack_from('<Q', tail, loc_rel + 8)[0]
+              with http_range(IPSW_URL, z64off, z64off + 255) as r:
+                  z64 = r.read()
+              cd_size   = struct.unpack_from('<Q', z64, 40)[0]
+              cd_offset = struct.unpack_from('<Q', z64, 48)[0]
 
           print(f"Central Directory: offset={cd_offset:,} size={cd_size:,}")
-
-          # 3. 获取中心目录
           with http_range(IPSW_URL, cd_offset, cd_offset + cd_size - 1) as r:
               cd_data = r.read()
-          print(f"读取了 {len(cd_data):,} bytes 中心目录数据")
 
-          # 4. 在中心目录中找目标文件，处理 ZIP64 extra field
-          def parse_zip64_extra(extra_data, need_size, need_uncomp, need_offset):
-              """从 extra field 中提取 ZIP64 扩展信息"""
-              i = 0
-              while i + 4 <= len(extra_data):
-                  tag  = struct.unpack_from('<H', extra_data, i)[0]
-                  size = struct.unpack_from('<H', extra_data, i+2)[0]
-                  data = extra_data[i+4:i+4+size]
-                  if tag == 0x0001:  # ZIP64 extended info
-                      off = 0
-                      uncomp = comp = lhdr = None
-                      if need_uncomp and off + 8 <= len(data):
-                          uncomp = struct.unpack_from('<Q', data, off)[0]; off += 8
-                      if need_size and off + 8 <= len(data):
-                          comp = struct.unpack_from('<Q', data, off)[0]; off += 8
-                      if need_offset and off + 8 <= len(data):
-                          lhdr = struct.unpack_from('<Q', data, off)[0]; off += 8
-                      return uncomp, comp, lhdr
-                  i += 4 + size
-              return None, None, None
-
+          # 建立文件名 -> (local_offset, comp_size, comp_method) 的映射
+          index = {}
           pos = 0
-          local_offset = comp_size = uncomp_size = None
           while pos < len(cd_data):
               if cd_data[pos:pos+4] != b'PK\x01\x02':
                   break
@@ -112,84 +94,89 @@ jobs:
               lhdr_off    = struct.unpack_from('<I', cd_data, pos+42)[0]
               fname = cd_data[pos+46:pos+46+fname_len].decode('utf-8', errors='replace')
               extra = cd_data[pos+46+fname_len:pos+46+fname_len+extra_len]
-
-              # ZIP64: 如果任何字段是 0xFFFFFFFF，从 extra field 读取真实值
-              need_uncomp  = (uncomp_sz == 0xFFFFFFFF)
-              need_comp    = (comp_sz   == 0xFFFFFFFF)
-              need_lhdr    = (lhdr_off  == 0xFFFFFFFF)
-              if need_uncomp or need_comp or need_lhdr:
-                  z_uncomp, z_comp, z_lhdr = parse_zip64_extra(extra, need_comp, need_uncomp, need_lhdr)
-                  if z_uncomp is not None: uncomp_sz = z_uncomp
-                  if z_comp   is not None: comp_sz   = z_comp
-                  if z_lhdr   is not None: lhdr_off  = z_lhdr
-
-              if fname == TARGET:
-                  local_offset = lhdr_off
-                  comp_size    = comp_sz
-                  uncomp_size  = uncomp_sz
-                  print(f"找到: {fname}")
-                  print(f"  compression={comp_method} comp={comp_sz:,} uncomp={uncomp_sz:,} lhdr_off={lhdr_off:,}")
-                  if comp_method != 0:
-                      print("ERROR: 文件有压缩，无法直接 Range 提取"); sys.exit(1)
-                  break
+              if uncomp_sz == 0xFFFFFFFF or comp_sz == 0xFFFFFFFF or lhdr_off == 0xFFFFFFFF:
+                  z_u, z_c, z_l = parse_zip64_extra(extra,
+                      uncomp_sz == 0xFFFFFFFF,
+                      comp_sz   == 0xFFFFFFFF,
+                      lhdr_off  == 0xFFFFFFFF)
+                  if z_u is not None: uncomp_sz = z_u
+                  if z_c is not None: comp_sz   = z_c
+                  if z_l is not None: lhdr_off  = z_l
+              index[fname] = (lhdr_off, comp_sz, comp_method)
               pos += 46 + fname_len + extra_len + comment_len
 
-          if local_offset is None:
-              print(f"ERROR: {TARGET} 不在 ZIP 中心目录中"); sys.exit(1)
+          print(f"ZIP 索引共 {len(index)} 个文件")
 
-          # 5. 读取 Local File Header 确定数据起始偏移
-          with http_range(IPSW_URL, local_offset, local_offset + 1023) as r:
-              lhdr = r.read()
-          lfname_len = struct.unpack_from('<H', lhdr, 26)[0]
-          lextra_len = struct.unpack_from('<H', lhdr, 28)[0]
-          data_start = local_offset + 30 + lfname_len + lextra_len
-          print(f"数据起始: byte {data_start:,}")
-          print(f"开始下载 {comp_size/1e9:.2f} GB ...")
+          def download_entry(target, out_path):
+              if target not in index:
+                  print(f"ERROR: {target} 不在 ZIP 中"); sys.exit(1)
+              lhdr_off, comp_sz, comp_method = index[target]
+              print(f"\n--- {target} ---")
+              print(f"  comp_method={comp_method} size={comp_sz/1e9:.2f} GB")
+              if comp_method != 0:
+                  print("ERROR: 文件有压缩，无法 Range 提取"); sys.exit(1)
+              with http_range(IPSW_URL, lhdr_off, lhdr_off + 1023) as r:
+                  lhdr = r.read()
+              fn_len = struct.unpack_from('<H', lhdr, 26)[0]
+              ex_len = struct.unpack_from('<H', lhdr, 28)[0]
+              data_start = lhdr_off + 30 + fn_len + ex_len
+              print(f"  data_start={data_start:,}, 开始下载...")
+              CHUNK = 8 * 1024 * 1024
+              done = 0
+              with http_range(IPSW_URL, data_start, data_start + comp_sz - 1) as r:
+                  with open(out_path, 'wb') as f:
+                      while True:
+                          chunk = r.read(CHUNK)
+                          if not chunk: break
+                          f.write(chunk)
+                          done += len(chunk)
+                          print(f"\r  {done/1e9:.2f}/{comp_sz/1e9:.2f} GB ({done/comp_sz*100:.1f}%)", end='', flush=True)
+              print(f"\n  完成: {os.path.getsize(out_path):,} bytes")
 
-          # 6. Range 下载
-          CHUNK = 8 * 1024 * 1024
-          downloaded = 0
-          with http_range(IPSW_URL, data_start, data_start + comp_size - 1) as r:
-              with open(OUT_PATH, 'wb') as out:
-                  while True:
-                      chunk = r.read(CHUNK)
-                      if not chunk:
-                          break
-                      out.write(chunk)
-                      downloaded += len(chunk)
-                      print(f"\r  {downloaded/1e9:.2f}/{comp_size/1e9:.2f} GB ({downloaded/comp_size*100:.1f}%)", end='', flush=True)
-          print(f"\n完成: {os.path.getsize(OUT_PATH):,} bytes")
+          download_entry("096-09648-074.dmg", "/tmp/rootfs.dmg")    # arm64 rootfs ~6.9GB
+          download_entry("096-09706-077.dmg", "/tmp/cryptex.dmg")   # OS cryptex  ~4.1GB
           PYEOF
 
-          ls -lh /tmp/096-09648-074.dmg
+          ls -lh /tmp/rootfs.dmg /tmp/cryptex.dmg
           df -h /
 
-      - name: Mount DMG and create compressed tarball
+      - name: Mount DMGs and create tarballs
         run: |
           set -euo pipefail
-          DMG="/tmp/096-09648-074.dmg"
-          MOUNT="/tmp/rootfs_mount"
-          mkdir -p "$MOUNT"
 
-          echo "挂载 DMG..."
-          sudo hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -readonly
+          echo "=== 挂载 rootfs ==="
+          sudo hdiutil attach /tmp/rootfs.dmg  -mountpoint /tmp/rootfs_mount  -nobrowse -readonly
+          echo "=== 挂载 cryptex ==="
+          sudo hdiutil attach /tmp/cryptex.dmg -mountpoint /tmp/cryptex_mount -nobrowse -readonly
           df -h /
 
-          echo "压缩打包 (gzip)..."
-          sudo tar -C "$MOUNT" -czf /tmp/rootfs.tar.gz .
+          echo "=== 打包 rootfs.tar.gz ==="
+          sudo tar -C /tmp/rootfs_mount  -czf /tmp/rootfs.tar.gz  .
+          echo "=== 打包 cryptex.tar.gz ==="
+          sudo tar -C /tmp/cryptex_mount -czf /tmp/cryptex.tar.gz .
 
-          sudo hdiutil detach "$MOUNT" || true
-          ls -lh /tmp/rootfs.tar.gz
+          sudo hdiutil detach /tmp/rootfs_mount  || true
+          sudo hdiutil detach /tmp/cryptex_mount || true
+          ls -lh /tmp/rootfs.tar.gz /tmp/cryptex.tar.gz
           df -h /
 
-      - name: Split archive and upload
+      - name: Split and upload
         run: |
-          split -b 1900m /tmp/rootfs.tar.gz /tmp/rootfs_part_
-          ls -lh /tmp/rootfs_part_*
+          # rootfs 较大，按 1.9GB 分割；cryptex 较小，不一定需要分割
+          split -b 1900m /tmp/rootfs.tar.gz  /tmp/rootfs_part_
+          split -b 1900m /tmp/cryptex.tar.gz /tmp/cryptex_part_
+          ls -lh /tmp/rootfs_part_* /tmp/cryptex_part_*
 
       - name: Upload rootfs artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-13.4-rootfs
           path: /tmp/rootfs_part_*
+          retention-days: 3
+
+      - name: Upload cryptex artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-13.4-cryptex
+          path: /tmp/cryptex_part_*
           retention-days: 3
