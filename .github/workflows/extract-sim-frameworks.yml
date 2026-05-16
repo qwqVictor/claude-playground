@@ -27,39 +27,44 @@ jobs:
           ls /Library/Developer/CoreSimulator/Profiles/Runtimes/ 2>/dev/null || echo "(empty)"
           ls /Library/Developer/CoreSimulator/Images/ 2>/dev/null || echo "(no Images dir)"
 
-      - name: Download iOS 16.4 Simulator Runtime
-        run: |
-          # iOS 16.4 build 20E247 — smallest available iOS 16 runtime
-          xcodebuild -downloadPlatform iOS -buildVersion 20E247
-        timeout-minutes: 45
-
-      - name: Find RuntimeRoot after download
+      - name: Find or download iOS Simulator Runtime
         id: find_runtime
         run: |
-          # Xcode 15+ stores runtimes as mounted DMGs under CoreSimulator/Volumes
-          # or as .simruntime bundles under CoreSimulator/Profiles/Runtimes
-          RUNTIME_ROOT=""
-          for p in \
-            "/Library/Developer/CoreSimulator/Volumes/iOS_*/Contents/Resources/RuntimeRoot" \
-            "/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS*.simruntime/Contents/Resources/RuntimeRoot" \
-            "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS*.simruntime/Contents/Resources/RuntimeRoot"
-          do
-            FOUND=$(ls -d $p 2>/dev/null | head -1)
-            if [ -n "$FOUND" ]; then
-              RUNTIME_ROOT="$FOUND"
-              echo "Found: $RUNTIME_ROOT"
-              break
-            fi
-          done
+          find_runtime_root() {
+            for p in \
+              "/Library/Developer/CoreSimulator/Volumes/iOS_*/Contents/Resources/RuntimeRoot" \
+              "/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS*.simruntime/Contents/Resources/RuntimeRoot" \
+              "/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS*.simruntime/Contents/Resources/RuntimeRoot"
+            do
+              FOUND=$(ls -d $p 2>/dev/null | head -1)
+              [ -n "$FOUND" ] && echo "$FOUND" && return 0
+            done
+            return 1
+          }
 
+          # Check if already present
+          RUNTIME_ROOT=$(find_runtime_root)
+          if [ -n "$RUNTIME_ROOT" ]; then
+            echo "Pre-installed runtime found: $RUNTIME_ROOT"
+            echo "runtime_root=$RUNTIME_ROOT" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Download — no -buildVersion, just let Xcode pick the recommended iOS runtime
+          echo "No runtime found, downloading..."
+          xcodebuild -downloadPlatform iOS
+          echo "Download complete."
+
+          RUNTIME_ROOT=$(find_runtime_root)
           if [ -z "$RUNTIME_ROOT" ]; then
-            echo "RuntimeRoot not found after download, dumping state:"
-            find /Library/Developer/CoreSimulator -maxdepth 4 -type d 2>/dev/null | head -30
+            echo "ERROR: RuntimeRoot still not found after download. Current state:"
+            find /Library/Developer/CoreSimulator -maxdepth 5 -type d 2>/dev/null | head -40
             xcrun simctl runtime list 2>/dev/null || true
             exit 1
           fi
 
           echo "runtime_root=$RUNTIME_ROOT" >> $GITHUB_OUTPUT
+        timeout-minutes: 45
 
       - name: Extract Metal Simulator Frameworks
         run: |
