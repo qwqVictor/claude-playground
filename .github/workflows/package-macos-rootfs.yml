@@ -73,17 +73,7 @@ jobs:
           gh release create macos-13.4-rootfs \
             --repo "${{ github.repository }}" \
             --title "macOS 13.4 Rootfs + Cryptex" \
-            --notes "macOS 13.4 (22F66) arm64 rootfs and OS cryptex, split into 1.9GB parts.
-
-Reassemble and extract:
-\`\`\`bash
-cat rootfs.tar.gz.part_* > rootfs.tar.gz
-tar xzf rootfs.tar.gz -C /var/mnt/rootfs_macOS/
-
-mkdir -p /var/mnt/rootfs_macOS/System/Volumes/Preboot/Cryptexes/OS
-cat cryptex.tar.gz.part_* > cryptex.tar.gz
-tar xzf cryptex.tar.gz -C /var/mnt/rootfs_macOS/System/Volumes/Preboot/Cryptexes/OS/
-\`\`\`" \
+            --notes "macOS 13.4 (22F66) arm64 rootfs and OS cryptex" \
             --prerelease 2>/dev/null || true
 
           # 上传所有分片
