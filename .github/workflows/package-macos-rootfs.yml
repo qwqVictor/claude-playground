@@ -6,6 +6,8 @@ on:
 jobs:
   package-rootfs:
     runs-on: macos-14
+    permissions:
+      contents: write
 
     steps:
       - name: Free up disk space
@@ -58,22 +60,34 @@ jobs:
           ls -lh /tmp/rootfs.tar.gz /tmp/cryptex.tar.gz
           df -h /
 
-      - name: Split archives
+      - name: Split and upload to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          split -b 1900m /tmp/rootfs.tar.gz  /tmp/rootfs_part_
-          split -b 1900m /tmp/cryptex.tar.gz /tmp/cryptex_part_
-          ls -lh /tmp/rootfs_part_* /tmp/cryptex_part_*
+          # GitHub Release 单文件上限 2GB，按 1.9GB 分割
+          split -b 1900m /tmp/rootfs.tar.gz  /tmp/rootfs.tar.gz.part_
+          split -b 1900m /tmp/cryptex.tar.gz /tmp/cryptex.tar.gz.part_
+          ls -lh /tmp/rootfs.tar.gz.part_* /tmp/cryptex.tar.gz.part_*
 
-      - name: Upload rootfs
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-13.4-rootfs
-          path: /tmp/rootfs_part_*
-          retention-days: 3
+          # 创建 release（已存在则忽略错误）
+          gh release create macos-13.4-rootfs \
+            --repo "${{ github.repository }}" \
+            --title "macOS 13.4 Rootfs + Cryptex" \
+            --notes "macOS 13.4 (22F66) arm64 rootfs and OS cryptex, split into 1.9GB parts.
 
-      - name: Upload cryptex
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-13.4-cryptex
-          path: /tmp/cryptex_part_*
-          retention-days: 3
+Reassemble and extract:
+\`\`\`bash
+cat rootfs.tar.gz.part_* > rootfs.tar.gz
+tar xzf rootfs.tar.gz -C /var/mnt/rootfs_macOS/
+
+mkdir -p /var/mnt/rootfs_macOS/System/Volumes/Preboot/Cryptexes/OS
+cat cryptex.tar.gz.part_* > cryptex.tar.gz
+tar xzf cryptex.tar.gz -C /var/mnt/rootfs_macOS/System/Volumes/Preboot/Cryptexes/OS/
+\`\`\`" \
+            --prerelease 2>/dev/null || true
+
+          # 上传所有分片
+          gh release upload macos-13.4-rootfs \
+            --repo "${{ github.repository }}" \
+            --clobber \
+            /tmp/rootfs.tar.gz.part_* /tmp/cryptex.tar.gz.part_*
